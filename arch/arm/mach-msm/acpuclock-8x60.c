@@ -93,6 +93,8 @@ static const void * const clk_sel_addr[] = {SPSS0_CLK_SEL_ADDR,
 static const int rpm_vreg_voter[] = { RPM_VREG_VOTER1, RPM_VREG_VOTER2 };
 static struct regulator *regulator_sc[NR_CPUS];
 
+extern uint32_t cmdline_maxkhz, cmdline_minkhz;
+
 enum scplls {
 	CPU0 = 0,
 	CPU1,
@@ -1020,8 +1022,18 @@ static int __init acpuclk_8x60_init(struct acpuclk_soc_data *soc_data)
 	bus_init();
 
 	/* Improve boot time by ramping up CPUs immediately. */
-	for_each_online_cpu(cpu)
-		acpuclk_8x60_set_rate(cpu, 1512000, SETRATE_INIT);
+	if ((cmdline_maxkhz) && (cmdline_minkhz)) {
+		for_each_online_cpu(cpu)
+			acpuclk_8x60_set_rate(cpu, cmdline_maxkhz, SETRATE_INIT);
+	} else {
+#ifdef CONFIG_MSM_CPU_FREQ_SET_MIN_MAX
+		for_each_online_cpu(cpu)
+			acpuclk_8x60_set_rate(cpu, CONFIG_MSM_CPU_FREQ_MAX, SETRATE_INIT);
+#else
+		for_each_online_cpu(cpu)
+			acpuclk_8x60_set_rate(cpu, 1512000, SETRATE_INIT);
+#endif
+	}
 
 	acpuclk_register(&acpuclk_8x60_data);
 	cpufreq_table_init();
@@ -1033,3 +1045,4 @@ static int __init acpuclk_8x60_init(struct acpuclk_soc_data *soc_data)
 struct acpuclk_soc_data acpuclk_8x60_soc_data __initdata = {
 	.init = acpuclk_8x60_init,
 };
+
