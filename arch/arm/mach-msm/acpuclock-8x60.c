@@ -897,6 +897,7 @@ static struct notifier_block __cpuinitdata acpuclock_cpu_notifier = {
 	.notifier_call = acpuclock_cpu_callback,
 };
 
+/* start cmdline_khz */
 #ifdef CONFIG_MSM_MPDEC
 uint32_t acpu_check_khz_value(unsigned long khz)
 {
@@ -938,6 +939,7 @@ uint32_t acpu_check_khz_value(unsigned long khz)
 }
 EXPORT_SYMBOL(acpu_check_khz_value);
 #endif
+/* end cmdline_khz */
 
 static unsigned int __init select_freq_plan(void)
 {
