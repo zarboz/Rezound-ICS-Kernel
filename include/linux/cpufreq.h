@@ -405,6 +405,9 @@ extern struct cpufreq_governor cpufreq_gov_badass;
 #elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVEX2)
 extern struct cpufreq_governor cpufreq_gov_interactivex2;
 #define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_interactivex2)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_WHEATLEY)
+extern struct cpufreq_governor cpufreq_gov_wheatley;
+#define CPUFREQ_DEFAULT_GOVERNOR  (&cpufreq_gov_wheatley)
 #endif
 
 
