@@ -76,7 +76,7 @@ static int lowmem_minfile_size = 6;
 
 static struct task_struct *lowmem_deathpending;
 static unsigned long lowmem_deathpending_timeout;
-extern int compact_nodes(void);
+extern int compact_nodes(int);
 static uint32_t lowmem_check_filepages = 0;
 #ifdef CONFIG_SWAP
 static int fudgeswap = 512;
@@ -307,7 +307,7 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		     sc->nr_to_scan, sc->gfp_mask, rem);
 	read_unlock(&tasklist_lock);
 	if (selected)
-		compact_nodes();
+		compact_nodes(false);
 	return rem;
 }
 
