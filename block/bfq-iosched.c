@@ -72,10 +72,10 @@ static const int bfq_fifo_expire[2] = { HZ / 4, HZ / 8 };
 static const int bfq_back_max = 16 * 1024;
 
 /* Penalty of a backwards seek, in number of sectors. */
-static const int bfq_back_penalty = 2;
+static const int bfq_back_penalty = 1;
 
 /* Idling period duration, in jiffies. */
-static int bfq_slice_idle = HZ / 125;
+static int bfq_slice_idle = 0;
 
 /* Default maximum budget values, in sectors and number of requests. */
 static const int bfq_default_max_budget = 16 * 1024;
@@ -117,6 +117,23 @@ static DEFINE_IDA(cic_index_ida);
 
 /* Shift used for peak rate fixed precision calculations. */
 #define BFQ_RATE_SHIFT		16
+
+/*
+ * The duration of the weight raising for interactive applications is
+ * computed automatically (as default behaviour), using the following
+ * formula: duration = (R / r) * T, where r is the peak rate of the
+ * disk, and R and T are two reference parameters. In particular, R is
+ * the peak rate of a reference disk, and T is about the maximum time
+ * for starting popular large applications on that disk, under BFQ and
+ * while reading two files in parallel. Finally, BFQ uses two
+ * different pairs (R, T) depending on whether the disk is rotational
+ * or non-rotational.
+ */
+#define T_rot			(msecs_to_jiffies(5500))
+#define T_nonrot		(msecs_to_jiffies(2000))
+/* Next two quantities are in sectors/usec, left-shifted by BFQ_RATE_SHIFT */
+#define R_rot			17415
+#define R_nonrot		34791
 
 #define BFQ_SERVICE_TREE_INIT	((struct bfq_service_tree)		\
 				{ RB_ROOT, RB_ROOT, NULL, NULL, 0, 0 })
@@ -418,6 +435,19 @@ static void bfq_updated_next_req(struct bfq_data *bfqd,
 	bfq_activate_bfqq(bfqd, bfqq);
 }
 
+static inline unsigned int bfq_wrais_duration(struct bfq_data *bfqd)
+{
+	u64 dur;
+
+	if (bfqd->bfq_raising_max_time > 0)
+		return bfqd->bfq_raising_max_time;
+
+	dur = bfqd->RT_prod;
+	do_div(dur, bfqd->peak_rate);
+
+	return dur;
+}
+
 static void bfq_add_rq_rb(struct request *rq)
 {
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
@@ -463,9 +493,12 @@ static void bfq_add_rq_rb(struct request *rq)
 		 */
 		if(old_raising_coeff == 1 && (idle_for_long_time || soft_rt)) {
 			bfqq->raising_coeff = bfqd->bfq_raising_coeff;
-			bfqq->raising_cur_max_time = idle_for_long_time ?
-				bfqd->bfq_raising_max_time :
-				bfqd->bfq_raising_rt_max_time;
+			if (idle_for_long_time)
+				bfqq->raising_cur_max_time =
+					bfq_wrais_duration(bfqd);
+			else
+				bfqq->raising_cur_max_time =
+					bfqd->bfq_raising_rt_max_time;
 			bfq_log_bfqq(bfqd, bfqq,
 				     "wrais starting at %llu msec,"
 				     "rais_max_time %u",
@@ -475,7 +508,7 @@ static void bfq_add_rq_rb(struct request *rq)
 		} else if (old_raising_coeff > 1) {
 			if (idle_for_long_time)
 				bfqq->raising_cur_max_time =
-					bfqd->bfq_raising_max_time;
+					bfq_wrais_duration(bfqd);
 			else if (bfqq->raising_cur_max_time ==
 				 bfqd->bfq_raising_rt_max_time &&
 				 !soft_rt) {
@@ -498,7 +531,7 @@ add_bfqq_busy:
 			bfqq->last_rais_start_finish +
                         bfqd->bfq_raising_min_inter_arr_async < jiffies) {
                         bfqq->raising_coeff = bfqd->bfq_raising_coeff;
-			bfqq->raising_cur_max_time = bfqd->bfq_raising_max_time;
+			bfqq->raising_cur_max_time = bfq_wrais_duration(bfqd);
 
 			entity->ioprio_changed = 1;
 			bfq_log_bfqq(bfqd, bfqq,
@@ -807,8 +840,10 @@ static struct bfq_queue *bfq_close_cooperator(struct bfq_data *bfqd,
  */
 static inline unsigned long bfq_max_budget(struct bfq_data *bfqd)
 {
-	return bfqd->budgets_assigned < 194 ? bfq_default_max_budget :
-		bfqd->bfq_max_budget;
+	if (bfqd->budgets_assigned < 194)
+		return bfq_default_max_budget;
+	else
+		return bfqd->bfq_max_budget;
 }
 
 /*
@@ -817,8 +852,10 @@ static inline unsigned long bfq_max_budget(struct bfq_data *bfqd)
  */
 static inline unsigned long bfq_min_budget(struct bfq_data *bfqd)
 {
-	return bfqd->budgets_assigned < 194 ? bfq_default_max_budget / 32 :
-		bfqd->bfq_max_budget / 32;
+	if (bfqd->budgets_assigned < 194)
+		return bfq_default_max_budget;
+	else
+		return bfqd->bfq_max_budget / 32;
 }
 
 /*
@@ -894,9 +931,11 @@ static void bfq_arm_slice_timer(struct bfq_data *bfqd)
 static void bfq_set_budget_timeout(struct bfq_data *bfqd)
 {
 	struct bfq_queue *bfqq = bfqd->active_queue;
-	unsigned int timeout_coeff =
-		bfqq->raising_cur_max_time == bfqd->bfq_raising_rt_max_time ?
-		1 : (bfqq->entity.weight / bfqq->entity.orig_weight);
+	unsigned int timeout_coeff;
+	if (bfqq->raising_cur_max_time == bfqd->bfq_raising_rt_max_time)
+		timeout_coeff = 1;
+	else
+		timeout_coeff = bfqq->entity.weight / bfqq->entity.orig_weight;
 
 	bfqd->last_budget_start = ktime_get();
 
@@ -1207,7 +1246,10 @@ static int bfq_update_peak_rate(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	if (!bfq_bfqq_sync(bfqq) || bfq_bfqq_budget_new(bfqq))
 		return 0;
 
-	delta = compensate ? bfqd->last_idling_start : ktime_get();
+	if (compensate)
+		delta = bfqd->last_idling_start;
+	else
+		delta = ktime_get();
 	delta = ktime_sub(delta, bfqd->last_budget_start);
 	usecs = ktime_to_us(delta);
 
@@ -1830,7 +1872,6 @@ static void bfq_init_prio_data(struct bfq_queue *bfqq, struct io_context *ioc)
 	 * elevate the priority of this queue.
 	 */
 	bfqq->org_ioprio = bfqq->entity.new_ioprio;
-	bfqq->org_ioprio_class = bfqq->entity.new_ioprio_class;
 	bfq_clear_bfqq_prio_changed(bfqq);
 }
 
@@ -2002,12 +2043,12 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 static void bfq_update_io_thinktime(struct bfq_data *bfqd,
 				    struct cfq_io_context *cic)
 {
-	unsigned long elapsed = jiffies - cic->last_end_request;
+	unsigned long elapsed = jiffies - cic->ttime.last_end_request;
 	unsigned long ttime = min(elapsed, 2UL * bfqd->bfq_slice_idle);
 
-	cic->ttime_samples = (7*cic->ttime_samples + 256) / 8;
-	cic->ttime_total = (7*cic->ttime_total + 256*ttime) / 8;
-	cic->ttime_mean = (cic->ttime_total + 128) / cic->ttime_samples;
+	cic->ttime.ttime_samples = (7*cic->ttime.ttime_samples + 256) / 8;
+	cic->ttime.ttime_total = (7*cic->ttime.ttime_total + 256*ttime) / 8;
+	cic->ttime.ttime_mean = (cic->ttime.ttime_total + 128) / cic->ttime.ttime_samples;
 }
 
 static void bfq_update_io_seektime(struct bfq_data *bfqd,
@@ -2077,8 +2118,8 @@ static void bfq_update_idle_window(struct bfq_data *bfqd,
 		(bfqd->hw_tag && BFQQ_SEEKY(bfqq) &&
 			bfqq->raising_coeff == 1))
 		enable_idle = 0;
-	else if (bfq_sample_valid(cic->ttime_samples)) {
-		if (cic->ttime_mean > bfqd->bfq_slice_idle &&
+	else if (bfq_sample_valid(cic->ttime.ttime_samples)) {
+		if (cic->ttime.ttime_mean > bfqd->bfq_slice_idle &&
 			bfqq->raising_coeff == 1)
 			enable_idle = 0;
 		else
@@ -2219,7 +2260,7 @@ static void bfq_completed_request(struct request_queue *q, struct request *rq)
 		bfqd->sync_flight--;
 
 	if (sync)
-		RQ_CIC(rq)->last_end_request = jiffies;
+		RQ_CIC(rq)->ttime.last_end_request = jiffies;
 
 	/*
 	 * If this is the active queue, check if it needs to be expired,
@@ -2254,30 +2295,6 @@ static void bfq_completed_request(struct request_queue *q, struct request *rq)
 		bfq_schedule_dispatch(bfqd);
 }
 
-/*
- * We temporarily boost lower priority queues if they are holding fs exclusive
- * resources.  They are boosted to normal prio (CLASS_BE/4).
- */
-static void bfq_prio_boost(struct bfq_queue *bfqq)
-{
-	if (has_fs_excl()) {
-		/*
-		 * Boost idle prio on transactions that would lock out other
-		 * users of the filesystem
-		 */
-		if (bfq_class_idle(bfqq))
-			bfqq->entity.new_ioprio_class = IOPRIO_CLASS_BE;
-		if (bfqq->entity.new_ioprio > IOPRIO_NORM)
-			bfqq->entity.new_ioprio = IOPRIO_NORM;
-	} else {
-		/*
-		 * Unboost the queue (if needed)
-		 */
-		bfqq->entity.new_ioprio_class = bfqq->org_ioprio_class;
-		bfqq->entity.new_ioprio = bfqq->org_ioprio;
-	}
-}
-
 static inline int __bfq_may_queue(struct bfq_queue *bfqq)
 {
 	if (bfq_bfqq_wait_request(bfqq) && bfq_bfqq_must_alloc(bfqq)) {
@@ -2308,7 +2325,6 @@ static int bfq_may_queue(struct request_queue *q, int rw)
 	bfqq = cic_to_bfqq(cic, rw_is_sync(rw));
 	if (bfqq != NULL) {
 		bfq_init_prio_data(bfqq, cic->ioc);
-		bfq_prio_boost(bfqq);
 
 		return __bfq_may_queue(bfqq);
 	}
@@ -2673,10 +2689,19 @@ static void *bfq_init_queue(struct request_queue *q)
 
 	bfqd->bfq_raising_coeff = 20;
 	bfqd->bfq_raising_rt_max_time = msecs_to_jiffies(300);
-	bfqd->bfq_raising_max_time = msecs_to_jiffies(7500);
+	bfqd->bfq_raising_max_time = 0;
 	bfqd->bfq_raising_min_idle_time = msecs_to_jiffies(2000);
 	bfqd->bfq_raising_min_inter_arr_async = msecs_to_jiffies(500);
 	bfqd->bfq_raising_max_softrt_rate = 7000;
+
+	/* Initially estimate the device's peak rate as the reference rate */
+	if (blk_queue_nonrot(bfqd->queue)) {
+		bfqd->RT_prod = R_nonrot * T_nonrot;
+		bfqd->peak_rate = R_nonrot;
+	} else {
+		bfqd->RT_prod = R_rot * T_rot;
+		bfqd->peak_rate = R_rot;
+	}
 
 	return bfqd;
 }
@@ -2722,6 +2747,14 @@ static ssize_t bfq_var_store(unsigned long *var, const char *page, size_t count)
 		*var = new_val;
 
 	return count;
+}
+
+static ssize_t bfq_raising_max_time_show(struct elevator_queue *e, char *page)
+{
+	struct bfq_data *bfqd = e->elevator_data;
+	return sprintf(page, "%d\n", bfqd->bfq_raising_max_time > 0 ?
+		       bfqd->bfq_raising_max_time :
+		       bfq_wrais_duration(bfqd));
 }
 
 static ssize_t bfq_weights_show(struct elevator_queue *e, char *page)
@@ -2774,7 +2807,6 @@ SHOW_FUNCTION(bfq_timeout_sync_show, bfqd->bfq_timeout[BLK_RW_SYNC], 1);
 SHOW_FUNCTION(bfq_timeout_async_show, bfqd->bfq_timeout[BLK_RW_ASYNC], 1);
 SHOW_FUNCTION(bfq_low_latency_show, bfqd->low_latency, 0);
 SHOW_FUNCTION(bfq_raising_coeff_show, bfqd->bfq_raising_coeff, 0);
-SHOW_FUNCTION(bfq_raising_max_time_show, bfqd->bfq_raising_max_time, 1);
 SHOW_FUNCTION(bfq_raising_rt_max_time_show, bfqd->bfq_raising_rt_max_time, 1);
 SHOW_FUNCTION(bfq_raising_min_idle_time_show, bfqd->bfq_raising_min_idle_time,
 	1);
@@ -2954,8 +2986,8 @@ static int __init bfq_init(void)
 	/*
 	 * Can be 0 on HZ < 1000 setups.
 	 */
-	if (bfq_slice_idle == 0)
-		bfq_slice_idle = 1;
+	//if (bfq_slice_idle == 0)
+	//	bfq_slice_idle = 1;
 
 	if (bfq_timeout_async == 0)
 		bfq_timeout_async = 1;
@@ -2987,3 +3019,4 @@ module_exit(bfq_exit);
 MODULE_AUTHOR("Fabio Checconi, Paolo Valente");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Budget Fair Queueing IO scheduler");
+

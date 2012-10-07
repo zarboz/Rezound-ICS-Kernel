@@ -1,5 +1,5 @@
 /*
- * BFQ-v4 for 3.0: data structures and common functions prototypes.
+ * BFQ-v5 for 3.1.0: data structures and common functions prototypes.
  *
  * Based on ideas and code from CFQ:
  * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
@@ -177,7 +177,6 @@ struct bfq_group;
  * @budget_timeout: budget expiration (in jiffies).
  * @dispatched: number of requests on the dispatch list or inside driver.
  * @org_ioprio: saved ioprio during boosted periods.
- * @org_ioprio_class: saved ioprio_class during boosted periods.
  * @flags: status flags.
  * @bfqq_list: node for active/idle bfqq list inside our bfqd.
  * @seek_samples: number of seeks sampled
@@ -219,7 +218,6 @@ struct bfq_queue {
 	int dispatched;
 
 	unsigned short org_ioprio;
-	unsigned short org_ioprio_class;
 
 	unsigned int flags;
 
@@ -299,6 +297,8 @@ struct bfq_queue {
  *                                   (in jiffies)
  * @bfq_raising_max_softrt_rate: max service-rate for a soft real-time queue,
  *			         sectors per seconds
+ * @RT_prod: cached value of the product R*T used for computing the maximum
+ * 	     duration of the weight raising automatically
  * @oom_bfqq: fallback dummy bfqq for extreme OOM conditions
  *
  * All the fields are protected by the @queue lock.
@@ -361,6 +361,7 @@ struct bfq_data {
 	unsigned int bfq_raising_min_idle_time;
 	unsigned int bfq_raising_min_inter_arr_async;
 	unsigned int bfq_raising_max_softrt_rate;
+	u64 RT_prod;
 
 	struct bfq_queue oom_bfqq;
 };
@@ -590,3 +591,4 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 static void bfq_put_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg);
 static void bfq_exit_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq);
 #endif
+
